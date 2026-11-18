@@ -1,14 +1,16 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 [assembly: AssemblyTitle(Manager.ProductTitle)]
 [assembly: AssemblyProduct(Manager.ProductTitle)]
@@ -19,7 +21,7 @@ internal sealed class Addon
     public string Name { get; set; }
     public string Repository { get; set; }
     public Release Latest;
-    public ListViewItem Row;
+    internal AddonTile Tile;
 }
 
 internal sealed class Release
@@ -115,76 +117,182 @@ internal sealed class Manager : Form
 {
     internal const string ProductTitle = "Dave's Discount Meats AddOn Manager";
     private readonly Addon[] addons;
-    private readonly TextBox folder = new TextBox { ReadOnly = true, Dock = DockStyle.Fill };
-    private readonly ListView list = new ListView {
-        Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true,
-        MultiSelect = false, HideSelection = false
+    private const string SettingsKey = @"Software\DDMAddOnManager";
+    private string addonDirectory = "";
+    private readonly Label folder = new Label {
+        Text = "No folder selected", Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft
     };
-    private readonly Button browse = new Button { Text = "Browse...", AutoSize = true };
+    private readonly ComboBox theme = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 104 };
+    private readonly Button browse = new Button { Text = "Browse…", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
     private readonly Button refresh = new Button { Text = "Check GitHub", AutoSize = true };
     private readonly Button install = new Button { Text = "Install selected", AutoSize = true };
+    private readonly Label details = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly Label status = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
+    private Addon Selected;
     private bool busy;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
 
     internal Manager(Addon[] catalog)
     {
         addons = catalog;
         Text = ProductTitle;
         Font = new Font("Segoe UI", 10);
-        ClientSize = new Size(830, 410);
-        MinimumSize = new Size(710, 360);
+        ClientSize = new Size(760, 470);
+        MinimumSize = new Size(605, 495);
         StartPosition = FormStartPosition.CenterScreen;
 
         var layout = new TableLayoutPanel {
-            Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 2, RowCount = 5
+            Dock = DockStyle.Fill, Padding = new Padding(22), ColumnCount = 2, RowCount = 7
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        layout.Controls.Add(new Label { Text = "WoW Forever AddOns folder", AutoSize = true }, 0, 0);
-        layout.Controls.Add(folder, 0, 1);
-        layout.Controls.Add(browse, 1, 1);
-        foreach (var column in new[] { "Addon", "Installed", "GitHub release", "Status" })
-            list.Columns.Add(column, column == "Status" ? 290 : column == "Addon" ? 220 : 115);
+        foreach (int height in new[] { 44, 26, 42, 0, 54, 43, 26 })
+            layout.RowStyles.Add(height == 0 ? new RowStyle(SizeType.Percent, 100) :
+                new RowStyle(SizeType.Absolute, height));
+
+        var title = new Label {
+            Text = "AddOn Manager", AutoSize = true, Font = new Font(Font.FontFamily, 20, FontStyle.Bold)
+        };
+        layout.Controls.Add(title, 0, 0);
+        var themeControls = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right };
+        themeControls.Controls.Add(new Label { Text = "Theme", AutoSize = true, Margin = new Padding(0, 6, 6, 0) });
+        theme.AccessibleName = "Color theme";
+        theme.Items.AddRange(new object[] { "System", "Light", "Dark" });
+        string savedTheme = RegistryValue(Registry.CurrentUser, SettingsKey, "Theme") as string;
+        theme.SelectedIndex = Math.Max(0, theme.Items.IndexOf(savedTheme ?? ""));
+        themeControls.Controls.Add(theme);
+        layout.Controls.Add(themeControls, 1, 0);
+        layout.Controls.Add(new Label { Text = "WoW Forever AddOns folder", AutoSize = true }, 0, 1);
+        layout.Controls.Add(folder, 0, 2);
+        layout.Controls.Add(browse, 1, 2);
+
+        var tiles = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
         foreach (Addon addon in addons)
         {
-            addon.Row = new ListViewItem(new[] { addon.Name, "", "", "" }) { Tag = addon };
-            list.Items.Add(addon.Row);
+            addon.Tile = new AddonTile(addon);
+            addon.Tile.Click += (sender, args) => SelectAddon(addon);
+            tiles.Controls.Add(addon.Tile);
         }
-        layout.Controls.Add(list, 0, 2);
-        layout.SetColumnSpan(list, 2);
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 4, 0, 0) };
-        actions.Controls.Add(refresh);
+        layout.Controls.Add(tiles, 0, 3);
+        layout.SetColumnSpan(tiles, 2);
+        layout.Controls.Add(details, 0, 4);
+        layout.SetColumnSpan(details, 2);
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         actions.Controls.Add(install);
-        layout.Controls.Add(actions, 0, 3);
+        actions.Controls.Add(refresh);
+        layout.Controls.Add(actions, 0, 5);
         layout.SetColumnSpan(actions, 2);
-        layout.Controls.Add(status, 0, 4);
+        layout.Controls.Add(status, 0, 6);
         layout.SetColumnSpan(status, 2);
         Controls.Add(layout);
 
         browse.Click += (sender, args) => PickFolder();
         refresh.Click += async (sender, args) => await RefreshReleases();
         install.Click += async (sender, args) => await InstallSelected();
-        list.SelectedIndexChanged += (sender, args) => UpdateButtons();
+        theme.SelectedIndexChanged += (sender, args) =>
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                    key.SetValue("Theme", theme.SelectedItem.ToString());
+            }
+            catch (UnauthorizedAccessException) { status.Text = "Could not save the theme preference."; }
+            catch (IOException) { status.Text = "Could not save the theme preference."; }
+            catch (System.Security.SecurityException) { status.Text = "Could not save the theme preference."; }
+            ApplyTheme();
+        };
         FormClosing += (sender, args) => { if (busy) args.Cancel = true; };
-        Shown += async (sender, args) => await RefreshReleases();
+        Shown += async (sender, args) => { ApplyTheme(); await RefreshReleases(); };
+        SelectAddon(addons[0]);
+        ApplyTheme();
+    }
+
+    private static object RegistryValue(RegistryKey root, string path, string name)
+    {
+        try
+        {
+            using (RegistryKey key = root.OpenSubKey(path))
+                return key == null ? null : key.GetValue(name);
+        }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (IOException) { return null; }
+        catch (System.Security.SecurityException) { return null; }
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        base.WndProc(ref message);
+        // Windows broadcasts settings, system color and theme changes.
+        if ((message.Msg == 0x001A || message.Msg == 0x0015 || message.Msg == 0x031A)
+            && addons != null && theme != null && theme.SelectedIndex >= 0)
+            ApplyTheme();
+    }
+
+    private void ApplyTheme()
+    {
+        object systemLight = RegistryValue(Registry.CurrentUser,
+            @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme");
+        bool dark = theme.SelectedIndex == 2 || (theme.SelectedIndex == 0 && Object.Equals(systemLight, 0));
+        BackColor = dark ? Color.FromArgb(20, 26, 37) : Color.FromArgb(241, 245, 251);
+        ForeColor = dark ? Color.FromArgb(234, 240, 249) : Color.FromArgb(23, 35, 55);
+        Color surface = dark ? Color.FromArgb(33, 42, 57) : Color.White;
+        Color accent = dark ? Color.FromArgb(145, 187, 255) : Color.FromArgb(38, 88, 183);
+        theme.BackColor = surface;
+        theme.ForeColor = ForeColor;
+        foreach (Button button in new[] { browse, refresh, install })
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.Padding = new Padding(8, 2, 8, 2);
+            button.BackColor = button == install ? accent : surface;
+            button.ForeColor = button == install ? (dark ? BackColor : Color.White) : ForeColor;
+            button.FlatAppearance.BorderColor = accent;
+        }
+        foreach (Addon addon in addons)
+        {
+            addon.Tile.Dark = dark;
+            addon.Tile.Accent = accent;
+            addon.Tile.BackColor = surface;
+            addon.Tile.ForeColor = ForeColor;
+            addon.Tile.Invalidate();
+        }
+        if (IsHandleCreated)
+        {
+            int value = dark ? 1 : 0;
+            if (DwmSetWindowAttribute(Handle, 20, ref value, sizeof(int)) != 0)
+                DwmSetWindowAttribute(Handle, 19, ref value, sizeof(int));
+        }
+    }
+
+    private void SelectAddon(Addon addon)
+    {
+        if (Selected != null)
+        {
+            Selected.Tile.Selected = false;
+            Selected.Tile.Invalidate();
+        }
+        Selected = addon;
+        addon.Tile.Selected = true;
+        ShowDetails(addon);
         UpdateButtons();
     }
 
-    private Addon Selected
+    private void ShowDetails(Addon addon)
     {
-        get { return list.SelectedItems.Count == 0 ? null : (Addon)list.SelectedItems[0].Tag; }
+        AddonTile tile = addon.Tile;
+        tile.AccessibleDescription = tile.State;
+        tile.Invalidate();
+        if (Selected == addon)
+            details.Text = addon.Name + "  •  Installed: " + tile.Installed +
+                "  •  GitHub: " + (String.IsNullOrEmpty(tile.Release) ? "—" : tile.Release) +
+                Environment.NewLine + tile.State;
     }
-
     private void UpdateButtons()
     {
         Addon addon = Selected;
         browse.Enabled = refresh.Enabled = !busy;
-        install.Enabled = !busy && folder.Text.Length > 0 && addon != null && Package(addon) != null;
+        install.Enabled = !busy && addonDirectory.Length > 0 && addon != null && Package(addon) != null;
     }
 
     private void PickFolder()
@@ -192,8 +300,8 @@ internal sealed class Manager : Form
         using (var picker = new FolderBrowserDialog { ShowNewFolderButton = false,
             Description = "Select your WoW Forever folder or its Interface\\AddOns folder." })
         {
-            if (folder.Text.Length > 0)
-                picker.SelectedPath = folder.Text;
+            if (addonDirectory.Length > 0)
+                picker.SelectedPath = addonDirectory;
             if (picker.ShowDialog(this) != DialogResult.OK)
                 return;
             string path = picker.SelectedPath;
@@ -206,6 +314,7 @@ internal sealed class Manager : Form
                 status.Text = "Choose an existing Interface\\AddOns folder.";
                 return;
             }
+            addonDirectory = path;
             folder.Text = path;
             foreach (Addon addon in addons)
                 ShowInstalled(addon);
@@ -232,22 +341,23 @@ internal sealed class Manager : Form
     private void ShowInstalled(Addon addon)
     {
         string version = null;
-        if (folder.Text.Length > 0)
+        if (addonDirectory.Length > 0)
         {
-            try { version = AddonFiles.VersionAt(Path.Combine(folder.Text, addon.Folder), addon.Folder); }
+            try { version = AddonFiles.VersionAt(Path.Combine(addonDirectory, addon.Folder), addon.Folder); }
             catch (IOException) { version = "Unreadable"; }
             catch (UnauthorizedAccessException) { version = "Unreadable"; }
         }
-        addon.Row.SubItems[1].Text = version ?? (folder.Text.Length == 0 ? "Select folder" : "Unknown");
+        addon.Tile.Installed = version ?? (addonDirectory.Length == 0 ? "Select folder" : "Unknown");
         if (Package(addon) != null)
         {
-            addon.Row.SubItems[3].Text = folder.Text.Length == 0 ? "Choose game folder" :
+            addon.Tile.State = addonDirectory.Length == 0 ? "Choose game folder" :
                 AddonFiles.SameVersion(version, addon.Latest.tag_name) ? "Current" :
-                Directory.Exists(Path.Combine(folder.Text, addon.Folder)) ? "Installed version differs" :
+                Directory.Exists(Path.Combine(addonDirectory, addon.Folder)) ? "Installed version differs" :
                 "Ready to install";
-            if (folder.Text.Length > 0 && !Directory.Exists(Path.Combine(folder.Text, addon.Folder)))
-                addon.Row.SubItems[1].Text = "Not installed";
+            if (addonDirectory.Length > 0 && !Directory.Exists(Path.Combine(addonDirectory, addon.Folder)))
+                addon.Tile.Installed = "Not installed";
         }
+        ShowDetails(addon);
     }
 
     private async Task RefreshReleases()
@@ -260,11 +370,12 @@ internal sealed class Manager : Form
             foreach (Addon addon in addons)
             {
                 addon.Latest = null;
-                addon.Row.SubItems[2].Text = "";
-                addon.Row.SubItems[3].Text = "Checking...";
+                addon.Tile.Release = "";
+                addon.Tile.State = "Checking...";
+                ShowDetails(addon);
                 if (String.IsNullOrWhiteSpace(addon.Repository))
                 {
-                    addon.Row.SubItems[3].Text = "GitHub repository pending";
+                    addon.Tile.State = "GitHub repository pending";
                     ShowInstalled(addon);
                     continue;
                 }
@@ -277,20 +388,20 @@ internal sealed class Manager : Form
                         string json = await client.DownloadStringTaskAsync(new Uri(endpoint));
                         addon.Latest = new JavaScriptSerializer().Deserialize<Release>(json);
                     }
-                    addon.Row.SubItems[2].Text = addon.Latest.tag_name;
+                    addon.Tile.Release = addon.Latest.tag_name;
                     if (Package(addon) == null)
-                        addon.Row.SubItems[3].Text = "Missing " + addon.Folder + ".zip";
+                        addon.Tile.State = "Missing " + addon.Folder + ".zip";
                 }
                 catch (WebException ex)
                 {
                     var response = ex.Response as HttpWebResponse;
-                    addon.Row.SubItems[3].Text = response == null ? "GitHub connection failed" :
+                    addon.Tile.State = response == null ? "GitHub connection failed" :
                         response.StatusCode == HttpStatusCode.NotFound ? "No public release found" :
                         "GitHub returned HTTP " + (int)response.StatusCode;
                 }
                 catch (ArgumentException)
                 {
-                    addon.Row.SubItems[3].Text = "Invalid GitHub response";
+                    addon.Tile.State = "Invalid GitHub response";
                 }
                 ShowInstalled(addon);
             }
@@ -307,7 +418,7 @@ internal sealed class Manager : Form
     {
         Addon addon = Selected;
         Asset asset = Package(addon);
-        string directory = folder.Text;
+        string directory = addonDirectory;
         string tag = addon.Latest.tag_name;
         if (Directory.Exists(Path.Combine(directory, addon.Folder)) &&
             MessageBox.Show(this, "Replace the installed " + addon.Name + " files with " + tag + "?",

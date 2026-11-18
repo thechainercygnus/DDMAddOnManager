@@ -21,7 +21,7 @@ $versionSource = Join-Path $dist 'Version.cs'
 [assembly: System.Reflection.AssemblyVersion("$Version.0")]
 [assembly: System.Reflection.AssemblyFileVersion("$Version.0")]
 "@ | Set-Content -LiteralPath $versionSource
-& $compiler /nologo /target:winexe "/out:$exe" "/resource:$catalogPath,addons.json" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $PSScriptRoot 'AddonManager.cs') $versionSource
+& $compiler /nologo /target:winexe "/out:$exe" "/resource:$catalogPath,addons.json" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $PSScriptRoot 'AddonManager.cs') (Join-Path $PSScriptRoot 'AddonTile.cs') $versionSource
 if ($LASTEXITCODE -ne 0) {
     throw 'The application build failed.'
 }
