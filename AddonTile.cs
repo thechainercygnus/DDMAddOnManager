@@ -4,26 +4,30 @@ using System.Linq;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
-internal sealed class AddonTile : Button
+internal class RoundedButton : Button
 {
-    private readonly Addon addon;
     private bool hovered;
-    internal bool Selected;
-    internal bool Dark;
-    internal Color Accent;
-    internal string Installed = "Select folder";
-    internal string Release = "";
-    internal string State = "";
+    internal Color BorderColor;
+    internal Color HoverColor;
+    internal Color DisabledSurface;
+    internal Color DisabledText;
 
-    internal AddonTile(Addon addon)
+    internal RoundedButton()
     {
-        this.addon = addon;
-        Text = addon.Name;
-        AccessibleName = addon.Name;
-        Size = new Size(164, 164);
-        Margin = new Padding(0, 0, 12, 12);
         FlatStyle = FlatStyle.Flat;
-        Cursor = Cursors.Hand;
+        FlatAppearance.BorderSize = 0;
+    }
+
+    internal static GraphicsPath RoundedRectangle(Rectangle bounds, int radius)
+    {
+        int diameter = radius * 2;
+        var path = new GraphicsPath();
+        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     protected override void OnMouseEnter(EventArgs e)
@@ -40,13 +44,71 @@ internal sealed class AddonTile : Button
         Invalidate();
     }
 
+    protected void DrawSurface(Graphics canvas, Color border, int thickness)
+    {
+        canvas.Clear(Parent == null ? SystemColors.Control : Parent.BackColor);
+        SmoothingMode previous = canvas.SmoothingMode;
+        canvas.SmoothingMode = SmoothingMode.AntiAlias;
+        int radius = Math.Max(2, (int)Math.Round(4 * canvas.DpiX / 96));
+        using (var shape = RoundedRectangle(new Rectangle(1, 1, Width - 3, Height - 3), radius))
+        using (var fill = new SolidBrush(!Enabled ? DisabledSurface : hovered ? HoverColor : BackColor))
+        using (var outline = new Pen(border, thickness))
+        {
+            canvas.FillPath(fill, shape);
+            canvas.DrawPath(outline, shape);
+        }
+        canvas.SmoothingMode = previous;
+    }
+
+    protected void DrawKeyboardFocus(Graphics canvas)
+    {
+        if (Focused && ShowFocusCues)
+            ControlPaint.DrawFocusRectangle(canvas, new Rectangle(5, 5, Width - 10, Height - 10),
+                ForeColor, BackColor);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        DrawSurface(e.Graphics, BorderColor, 1);
+        TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, Enabled ? ForeColor : DisabledText,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        DrawKeyboardFocus(e.Graphics);
+    }
+}
+
+
+internal sealed class AddonTile : RoundedButton
+{
+    private readonly Addon addon;
+    internal bool Selected;
+    internal Color SecondaryText;
+    internal Color Accent;
+    internal string Installed = "Select folder";
+    internal string Release = "";
+    internal string State = "";
+
+    internal AddonTile(Addon addon)
+    {
+        this.addon = addon;
+        Text = addon.Name;
+        AccessibleName = addon.Name;
+        Size = new Size(164, 164);
+        Margin = new Padding(0, 0, 12, 12);
+        FlatStyle = FlatStyle.Flat;
+        Cursor = Cursors.Hand;
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         Graphics canvas = e.Graphics;
-        canvas.Clear(BackColor);
-        using (var border = new Pen(Selected || hovered ? Accent : (Dark ? Color.FromArgb(73, 84, 103) :
-            Color.FromArgb(197, 208, 224)), Selected ? 2 : 1))
-            canvas.DrawRectangle(border, 1, 1, Width - 3, Height - 3);
+        DrawSurface(canvas, Selected ? Accent : BorderColor, Selected ? 2 : 1);
+        if (Selected)
+        {
+            using (var check = new Pen(Accent, 2))
+                canvas.DrawLines(check, new[] { new Point(Width - 25, 18),
+                    new Point(Width - 21, 22), new Point(Width - 14, 14) });
+        }
 
         int artSize = Height / 2;
         var art = new Rectangle((Width - artSize) / 2, 12, artSize, artSize);
@@ -57,10 +119,9 @@ internal sealed class AddonTile : Button
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
             TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         TextRenderer.DrawText(canvas, State, Font, new Rectangle(8, Height - 26, Width - 16, 20),
-            ForeColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
             TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
-        if (Focused && ShowFocusCues)
-            ControlPaint.DrawFocusRectangle(canvas, new Rectangle(4, 4, Width - 8, Height - 8));
+        DrawKeyboardFocus(canvas);
     }
 
     private void DrawArtwork(Graphics canvas, Rectangle bounds)
@@ -100,7 +161,8 @@ internal sealed class AddonTile : Button
                 StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round
             })
             {
-                canvas.FillRectangle(background, 0, 0, 80, 80);
+                using (var shape = RoundedRectangle(new Rectangle(0, 0, 80, 80), 4))
+                    canvas.FillPath(background, shape);
                 switch (key)
                 {
                     case "characterplannerexport":

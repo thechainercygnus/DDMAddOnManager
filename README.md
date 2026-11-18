@@ -21,4 +21,4 @@ Commit this project as its own GitHub repository with `.github/workflows/release
 
 For each addon release, set the TOC's `## Version:` to the release version, build the ZIP, and attach it to a public GitHub Release in that addon's catalog repository. Use a tag such as `v0.2.0` for TOC version `0.2.0`. The asset must be named `<AddonFolder>.zip` and contain `<AddonFolder>/<AddonFolder>.toc`. The manager reads the latest published stable release and downloads that named asset. [GitHub Releases API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
 
-The catalog uses the existing Character Planner Export and DDM Action Bar Manager remotes. Fill in the `Repository` field for Forever API Explorer once it has a public repository and release.
+The catalog uses the GitHub repositories for Character Planner Export, DDM Action Bar Manager, and Forever API Explorer.
