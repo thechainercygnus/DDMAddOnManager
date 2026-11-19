@@ -1,5 +1,7 @@
 # Dave's Discount Meats AddOn Manager
 
+Part of a set of [WoW: Forever tools](https://github.com/thechainercygnus).
+
 A Windows app for installing and updating World of Warcraft: Forever add-ons from public GitHub releases.
 
 [Download the latest Windows installer](https://github.com/thechainercygnus/DDMAddOnManager/releases/latest)
@@ -48,3 +50,8 @@ Use PowerShell 7 on 64-bit Windows.
 The catalog in [addons.json](addons.json) lists Character Planner Export, DDM Action Bar Manager, and Forever API Explorer. Each entry specifies the add-on folder, display name, and GitHub repository.
 
 For each add-on release, set the TOC's `## Version:` to the release version and publish a stable GitHub release with a matching tag, such as `v0.2.0` for TOC version `0.2.0`. Attach a ZIP named `<AddonFolder>.zip` containing `<AddonFolder>/<AddonFolder>.toc`. The manager checks the latest public stable release and downloads that exact asset.
+
+## License
+
+[MIT](LICENSE). World of Warcraft names and game data belong to Blizzard
+Entertainment. This project isn't affiliated with or endorsed by Blizzard.
