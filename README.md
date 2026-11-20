@@ -21,6 +21,8 @@ Dark and Light modes with two add-ons selected. The folder and versions shown ar
 3. To upgrade, close the manager and run the newer installer. Setup replaces the existing copy in place.
 4. To remove the manager, close it and go to **Settings > Apps > Installed apps**.
 
+The manager checks for a newer stable release at startup. Click **App updates** to check manually. When **Update available** appears, click it to open the release page, download Setup, and close the manager before running it.
+
 If you have a portable ZIP from a local build, extract it and run the manager directly.
 
 ## Install and update add-ons
@@ -36,6 +38,15 @@ The manager compares the installed add-on's TOC version with the latest GitHub r
 Install or update while the game is closed. The manager writes into the selected AddOns directory. WoW's SavedVariables are stored separately.
 
 Choose **System**, **Light**, or **Dark** in the header. System follows the Windows app color setting, and the manager remembers your choice.
+
+## Add an add-on from GitHub
+
+Click **Add from GitHub…** and paste an HTTPS link to a public GitHub repository or one of its release pages. The manager uses the latest stable release. If the add-on's installed folder name differs from the repository name, enter the folder name before clicking **Add**. Custom entries are saved for your Windows account and appear alongside the bundled add-ons.
+
+The release must include an uploaded ZIP. The manager looks for a ZIP named after the add-on folder first, then accepts a differently named ZIP if it is the release's only uploaded ZIP. The archive must contain the add-on folder with its matching TOC file, and the TOC version must match the release tag. GitHub's automatically generated source archives are separate from uploaded release assets.
+
+Add the [Questie repository](https://github.com/Questie/Questie) once to install or update both Questie and QuestieDB together. The [standalone QuestieDB repository](https://github.com/Questie/QuestieDB) uses its Forever ZIP. The manager prevents both entries from managing the same folder.
+
 
 ## Build and publish
 

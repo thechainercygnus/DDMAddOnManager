@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
@@ -21,7 +22,38 @@ internal sealed class Addon
     public string Folder { get; set; }
     public string Name { get; set; }
     public string Repository { get; set; }
-    public Release Latest;
+    internal bool IsQuestieBundle
+    {
+        get { return String.Equals(Repository, "Questie/Questie", StringComparison.OrdinalIgnoreCase); }
+    }
+
+    internal bool IsQuestieDatabase
+    {
+        get { return String.Equals(Repository, "Questie/QuestieDB", StringComparison.OrdinalIgnoreCase); }
+    }
+
+    internal string[] Folders
+    {
+        get { return IsQuestieBundle ? new[] { "Questie", "QuestieDB" } :
+            new[] { IsQuestieDatabase ? "QuestieDB" : Folder }; }
+    }
+
+    internal string Manifest(string folder)
+    {
+        return folder + (IsQuestieBundle || IsQuestieDatabase ? "_Forever.toc" : ".toc");
+    }
+
+    internal string[] ReleaseVersions(string tag)
+    {
+        if (!IsQuestieBundle)
+            return new[] { tag };
+
+        Match bundle = Regex.Match(tag ?? "", @"\Abundle/v([0-9]+\.[0-9]+\.[0-9]+)\+v([0-9]+\.[0-9]+\.[0-9]+)\z");
+        return bundle.Success ? new[] { bundle.Groups[1].Value, bundle.Groups[2].Value } : null;
+    }
+
+    internal Release Latest;
+    internal bool Custom;
     internal AddonTile Tile;
 }
 
@@ -39,9 +71,9 @@ internal sealed class Asset
 
 internal static class AddonFiles
 {
-    internal static string VersionAt(string directory, string folder)
+    internal static string VersionAt(string directory, string manifestName)
     {
-        string manifest = Path.Combine(directory, folder + ".toc");
+        string manifest = Path.Combine(directory, manifestName);
         if (!File.Exists(manifest))
             return null;
         string version = File.ReadLines(manifest).FirstOrDefault(line =>
@@ -58,49 +90,76 @@ internal static class AddonFiles
 
     internal static void Install(string directory, Addon addon, string archive, string tag)
     {
-        string destination = Path.Combine(directory, addon.Folder);
-        if (Directory.Exists(destination) &&
-            (File.GetAttributes(destination) & FileAttributes.ReparsePoint) != 0)
-            throw new IOException("The installed addon folder is a link.");
+        string[] folders = addon.Folders;
+        string[] versions = addon.ReleaseVersions(tag);
+        if (versions == null)
+            throw new InvalidDataException("Unrecognized package version.");
 
         string staging = Path.Combine(directory, ".addon-manager-" + Guid.NewGuid().ToString("N"));
         string extracted = Path.Combine(staging, "package");
         string backup = Path.Combine(staging, "previous");
-        Directory.CreateDirectory(staging);
+        Directory.CreateDirectory(backup);
+        var backedUp = new List<string>();
+        var installed = new List<string>();
         bool preserveBackup = false;
         try
         {
             ZipFile.ExtractToDirectory(archive, extracted);
-            string source = Path.Combine(extracted, addon.Folder);
-            if (!SameVersion(VersionAt(source, addon.Folder), tag))
-                throw new InvalidDataException("The ZIP must contain " + addon.Folder +
-                    "/" + addon.Folder + ".toc with a version matching " + tag + ".");
+            for (int index = 0; index < folders.Length; index++)
+            {
+                string folder = folders[index];
+                string manifest = addon.Manifest(folder);
+                string destination = Path.Combine(directory, folder);
+                if (Directory.Exists(destination) &&
+                    (File.GetAttributes(destination) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("The installed " + folder + " folder is a link.");
 
-            bool hasPrevious = Directory.Exists(destination);
-            if (hasPrevious)
-                Directory.Move(destination, backup);
+                string source = Path.Combine(extracted, folder);
+                if (!SameVersion(VersionAt(source, manifest), versions[index]))
+                    throw new InvalidDataException("The ZIP must contain " + folder + "/" + manifest +
+                        " with a version matching " + versions[index] + ".");
+
+                // Older Forever clients look for the Camelot filename.
+                if (addon.IsQuestieBundle || addon.IsQuestieDatabase)
+                {
+                    string alias = Path.Combine(source, folder + "_Camelot.toc");
+                    if (!File.Exists(alias))
+                        File.Copy(Path.Combine(source, manifest), alias);
+                }
+            }
+
+            foreach (string folder in folders)
+            {
+                string destination = Path.Combine(directory, folder);
+                if (Directory.Exists(destination))
+                {
+                    Directory.Move(destination, Path.Combine(backup, folder));
+                    backedUp.Add(folder);
+                }
+                Directory.Move(Path.Combine(extracted, folder), destination);
+                installed.Add(folder);
+            }
+        }
+        catch
+        {
             try
             {
-                Directory.Move(source, destination);
+                foreach (string folder in Enumerable.Reverse(installed))
+                    Directory.Move(Path.Combine(directory, folder), Path.Combine(extracted, folder));
+                foreach (string folder in Enumerable.Reverse(backedUp))
+                    Directory.Move(Path.Combine(backup, folder), Path.Combine(directory, folder));
             }
-            catch
+            catch (IOException ex)
             {
-                if (hasPrevious)
-                {
-                    preserveBackup = true;
-                    try { Directory.Move(backup, destination); }
-                    catch (IOException ex)
-                    {
-                        throw new IOException("Install failed. Previous files are at " + backup, ex);
-                    }
-                    catch (UnauthorizedAccessException ex)
-                    {
-                        throw new IOException("Install failed. Previous files are at " + backup, ex);
-                    }
-                    preserveBackup = false;
-                }
-                throw;
+                preserveBackup = true;
+                throw new IOException("Install failed during rollback. Recovery files are at " + staging, ex);
             }
+            catch (UnauthorizedAccessException ex)
+            {
+                preserveBackup = true;
+                throw new IOException("Install failed during rollback. Recovery files are at " + staging, ex);
+            }
+            throw;
         }
         finally
         {
@@ -117,7 +176,9 @@ internal static class AddonFiles
 internal sealed class Manager : Form
 {
     internal const string ProductTitle = "Dave's Discount Meats AddOn Manager";
-    private readonly Addon[] addons;
+    private readonly List<Addon> addons;
+    private readonly FlowLayoutPanel tiles = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
+    private readonly RoundedButton addGitHub = new RoundedButton { Text = "Add from GitHub…", AutoSize = true };
     private const string SettingsKey = @"Software\DDMAddOnManager";
     private string addonDirectory = "";
     private readonly TableLayoutPanel folderRow = new TableLayoutPanel {
@@ -132,22 +193,28 @@ internal sealed class Manager : Form
     private string colorTheme = "System";
     private readonly RoundedButton browse = new RoundedButton { Text = "Browse…", AutoSize = true, Anchor = AnchorStyles.Right };
     private readonly RoundedButton refresh = new RoundedButton { Text = "Refresh Available", AutoSize = true };
+    private readonly RoundedButton appUpdates = new RoundedButton { Text = "App updates", AutoSize = true };
     private readonly RoundedButton install = new RoundedButton { Text = "Install selected", AutoSize = true };
     private readonly Label details = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly Label status = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
     private Addon detailsAddon;
     private bool busy;
+    private bool checkingUpdate;
+    private Version availableUpdate;
+    private string availableUpdateTag;
+    private const string ManagerReleasePage = "https://github.com/thechainercygnus/DDMAddOnManager/releases/tag/";
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
 
     internal Manager(Addon[] catalog)
     {
-        addons = catalog;
+        addons = new List<Addon>(catalog);
+        LoadCustomAddons();
         Text = ProductTitle;
         Font = new Font("Segoe UI", 10);
         ClientSize = new Size(760, 470);
-        MinimumSize = new Size(605, 495);
+        MinimumSize = new Size(680, 495);
         StartPosition = FormStartPosition.CenterScreen;
 
         var layout = new TableLayoutPanel {
@@ -191,13 +258,8 @@ internal sealed class Manager : Form
         layout.Controls.Add(folderRow, 0, 1);
         layout.SetColumnSpan(folderRow, 2);
 
-        var tiles = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true };
         foreach (Addon addon in addons)
-        {
-            addon.Tile = new AddonTile(addon);
-            addon.Tile.Click += (sender, args) => ToggleAddon(addon);
-            tiles.Controls.Add(addon.Tile);
-        }
+            AddTile(addon);
         layout.Controls.Add(tiles, 0, 2);
         layout.SetColumnSpan(tiles, 2);
         layout.Controls.Add(details, 0, 3);
@@ -205,6 +267,8 @@ internal sealed class Manager : Form
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         actions.Controls.Add(install);
         actions.Controls.Add(refresh);
+        actions.Controls.Add(addGitHub);
+        actions.Controls.Add(appUpdates);
         layout.Controls.Add(actions, 0, 4);
         layout.SetColumnSpan(actions, 2);
         layout.Controls.Add(status, 0, 5);
@@ -212,24 +276,189 @@ internal sealed class Manager : Form
         Controls.Add(layout);
 
         browse.Click += (sender, args) => PickFolder();
+        appUpdates.Click += async (sender, args) =>
+        {
+            if (availableUpdate == null)
+                await CheckManagerUpdate(true);
+            else
+                OfferManagerUpdate();
+        };
+        addGitHub.Click += async (sender, args) => await AddGitHubAddon();
         refresh.Click += async (sender, args) => await RefreshReleases();
         install.Click += async (sender, args) => await InstallSelected();
         FormClosing += (sender, args) => { if (busy) args.Cancel = true; };
         Shown += async (sender, args) =>
         {
             ApplyTheme();
+            busy = true;
+            UpdateButtons();
+            Task updateCheck = CheckManagerUpdate(false);
             string detected = await Task.Run((Func<string>)DetectAddonDirectory);
             if (IsDisposed)
                 return;
             if (addonDirectory.Length == 0 && detected != null)
                 UseAddonDirectory(detected);
-            if (!busy)
-                await RefreshReleases();
+            await RefreshReleases();
+            await updateCheck;
         };
         detailsAddon = addons[0];
         ShowDetails(detailsAddon);
         UpdateButtons();
         ApplyTheme();
+    }
+
+    private void AddTile(Addon addon)
+    {
+        addon.Tile = new AddonTile(addon);
+        addon.Tile.Click += (sender, args) => ToggleAddon(addon);
+        tiles.Controls.Add(addon.Tile);
+    }
+
+    private static bool ValidFolder(string folder)
+    {
+        return Regex.IsMatch(folder ?? "", @"\A[A-Za-z0-9_][A-Za-z0-9_-]*\z") &&
+            !Regex.IsMatch(folder, @"\A(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])\z", RegexOptions.IgnoreCase);
+    }
+
+    private static bool ValidRepository(string repository)
+    {
+        return Regex.IsMatch(repository ?? "", @"\A[A-Za-z0-9-]+/[A-Za-z0-9_.-]+\z") &&
+            !repository.EndsWith("/.", StringComparison.Ordinal) &&
+            !repository.EndsWith("/..", StringComparison.Ordinal);
+    }
+
+    private bool ConflictsWithCatalog(Addon addon)
+    {
+        return addons.Any(existing =>
+            existing.Folders.Intersect(addon.Folders, StringComparer.OrdinalIgnoreCase).Any() ||
+            String.Equals(existing.Repository, addon.Repository, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void LoadCustomAddons()
+    {
+        string json = RegistryValue(Registry.CurrentUser, SettingsKey, "CustomAddons") as string;
+        if (String.IsNullOrEmpty(json))
+            return;
+
+        Addon[] saved;
+        try { saved = new JavaScriptSerializer().Deserialize<Addon[]>(json); }
+        catch (ArgumentException) { return; }
+        catch (InvalidOperationException) { return; }
+
+        foreach (Addon addon in saved ?? new Addon[0])
+        {
+            if (addon == null || !ValidFolder(addon.Folder) || !ValidRepository(addon.Repository) ||
+                String.IsNullOrWhiteSpace(addon.Name) || ConflictsWithCatalog(addon))
+                continue;
+            addon.Custom = true;
+            addons.Add(addon);
+        }
+    }
+
+    private static string RepositoryFromLink(string link)
+    {
+        Uri url;
+        if (!Uri.TryCreate(link.Trim(), UriKind.Absolute, out url) || url.Scheme != Uri.UriSchemeHttps ||
+            !String.Equals(url.Host, "github.com", StringComparison.OrdinalIgnoreCase) ||
+            url.UserInfo.Length != 0 || !url.IsDefaultPort)
+            return null;
+
+        string[] parts = url.AbsolutePath.Trim('/').Split('/');
+        if (parts.Length < 2 || (parts.Length > 2 && parts[2] != "releases"))
+            return null;
+        string name = parts[1];
+        if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            name = name.Substring(0, name.Length - 4);
+        string repository = parts[0] + "/" + name;
+        return ValidRepository(repository) ? repository : null;
+    }
+
+    private async Task AddGitHubAddon()
+    {
+        using (var dialog = new Form {
+            Text = "Add from GitHub", Font = Font, ClientSize = new Size(475, 213),
+            BackColor = BackColor, ForeColor = ForeColor, FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false,
+            ShowInTaskbar = false
+        })
+        {
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14),
+                ColumnCount = 1, RowCount = 6 };
+            foreach (int height in new[] { 23, 32, 23, 32, 36, 37 })
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            var link = new TextBox { Dock = DockStyle.Fill, AccessibleName = "GitHub repository link",
+                BackColor = BackColor, ForeColor = ForeColor };
+            var folderInput = new TextBox { Dock = DockStyle.Fill, AccessibleName = "Add-on folder name",
+                BackColor = BackColor, ForeColor = ForeColor };
+            var error = new Label { Dock = DockStyle.Fill };
+            var add = new Button { Text = "Add", AutoSize = true };
+            var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+            buttons.Controls.Add(cancel);
+            buttons.Controls.Add(add);
+            layout.Controls.Add(new Label { Text = "GitHub repository link", AutoSize = true }, 0, 0);
+            layout.Controls.Add(link, 0, 1);
+            layout.Controls.Add(new Label { Text = "Add-on folder name (optional)", AutoSize = true }, 0, 2);
+            layout.Controls.Add(folderInput, 0, 3);
+            layout.Controls.Add(error, 0, 4);
+            layout.Controls.Add(buttons, 0, 5);
+            dialog.Controls.Add(layout);
+            dialog.AcceptButton = add;
+            dialog.CancelButton = cancel;
+
+            Addon entry = null;
+            add.Click += (sender, args) =>
+            {
+                string repository = RepositoryFromLink(link.Text);
+                if (repository == null)
+                {
+                    error.Text = "Enter an HTTPS GitHub repository or release link.";
+                    return;
+                }
+                string name = repository.Substring(repository.IndexOf('/') + 1);
+                string folderName = folderInput.Text.Trim();
+                if (folderName.Length == 0)
+                    folderName = name;
+                if (!ValidFolder(folderName))
+                {
+                    error.Text = "Enter the add-on folder name using letters, numbers, underscores, or hyphens.";
+                    return;
+                }
+                entry = new Addon { Name = name, Folder = folderName, Repository = repository, Custom = true };
+                if (entry.IsQuestieBundle || entry.IsQuestieDatabase)
+                {
+                    entry.Folder = entry.Folders[0];
+                    entry.Name = entry.IsQuestieBundle ? "Questie + QuestieDB" : "QuestieDB";
+                }
+                if (ConflictsWithCatalog(entry))
+                {
+                    error.Text = "That repository or add-on folder is already in the manager.";
+                    return;
+                }
+                dialog.DialogResult = DialogResult.OK;
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+                return;
+            try
+            {
+                string json = new JavaScriptSerializer().Serialize(addons.Where(addon => addon.Custom)
+                    .Concat(new[] { entry }).ToArray());
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                    key.SetValue("CustomAddons", json);
+            }
+            catch (UnauthorizedAccessException) { status.Text = "Could not save the add-on."; return; }
+            catch (IOException) { status.Text = "Could not save the add-on."; return; }
+            catch (System.Security.SecurityException) { status.Text = "Could not save the add-on."; return; }
+            catch (InvalidOperationException) { status.Text = "Could not save the add-on."; return; }
+
+            addons.Add(entry);
+            AddTile(entry);
+            detailsAddon = entry;
+            ApplyTheme();
+            tiles.ScrollControlIntoView(entry.Tile);
+            await RefreshReleases(entry);
+        }
     }
 
     private void ChangeTheme(string choice)
@@ -298,7 +527,7 @@ internal sealed class Manager : Form
         }
         folderRow.BackColor = highContrast ? SystemColors.Window : Gray(dark ? 39 : 238);
         folder.ForeColor = status.ForeColor = secondary;
-        foreach (RoundedButton button in new[] { browse, refresh, install })
+        foreach (RoundedButton button in new[] { browse, refresh, install, addGitHub, appUpdates })
         {
             bool primary = button == install;
             button.Padding = new Padding(10, 3, 10, 3);
@@ -360,7 +589,8 @@ internal sealed class Manager : Form
     private void UpdateButtons()
     {
         int count = InstallableSelection().Length;
-        browse.Enabled = refresh.Enabled = !busy;
+        browse.Enabled = refresh.Enabled = addGitHub.Enabled = !busy;
+        appUpdates.Enabled = !busy && !checkingUpdate;
         install.Text = count == 0 ? "Install selected" :
             count == 1 ? "Install 1 add-on" : "Install " + count + " add-ons";
         install.Enabled = !busy && addonDirectory.Length > 0 && count > 0;
@@ -454,6 +684,91 @@ internal sealed class Manager : Form
         }
     }
 
+    private static Version NewerManagerVersion(Release release, Version installed)
+    {
+        Version published;
+        if (release == null || !Regex.IsMatch(release.tag_name ?? "", @"\Av[0-9]+\.[0-9]+\.[0-9]+\z") ||
+            !Version.TryParse(release.tag_name.Substring(1), out published) ||
+            release.assets == null || !release.assets.Any(asset => asset != null &&
+                String.Equals(asset.name, "DDMAddOnManager-Setup.exe", StringComparison.OrdinalIgnoreCase)))
+            return null;
+
+        var current = new Version(installed.Major, installed.Minor, Math.Max(0, installed.Build));
+        return published > current ? published : null;
+    }
+
+    private async Task CheckManagerUpdate(bool interactive)
+    {
+        if (checkingUpdate)
+            return;
+
+        checkingUpdate = true;
+        UpdateButtons();
+        try
+        {
+            const string endpoint = "https://api.github.com/repos/thechainercygnus/DDMAddOnManager/releases/latest";
+            Release release;
+            using (var client = GitHubClient())
+            {
+                client.Headers["Accept"] = "application/vnd.github+json";
+                string json = await client.DownloadStringTaskAsync(new Uri(endpoint));
+                release = new JavaScriptSerializer().Deserialize<Release>(json);
+            }
+
+            if (IsDisposed || Disposing)
+                return;
+
+            availableUpdate = NewerManagerVersion(release, typeof(Manager).Assembly.GetName().Version);
+            if (availableUpdate != null)
+            {
+                availableUpdateTag = release.tag_name;
+                appUpdates.Text = "Update available";
+                appUpdates.AccessibleDescription = "Version " + availableUpdate + " is available.";
+                if (interactive)
+                    OfferManagerUpdate();
+            }
+            else if (interactive)
+            {
+                MessageBox.Show(this, "No newer installer is available.", "App updates",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+        catch (WebException) { ShowUpdateCheckError(interactive); }
+        catch (ArgumentException) { ShowUpdateCheckError(interactive); }
+        catch (InvalidOperationException) { ShowUpdateCheckError(interactive); }
+        finally
+        {
+            checkingUpdate = false;
+            if (!IsDisposed && !Disposing)
+                UpdateButtons();
+        }
+    }
+
+    private void ShowUpdateCheckError(bool interactive)
+    {
+        if (interactive && !IsDisposed && !Disposing)
+            MessageBox.Show(this, "Could not check GitHub for a manager update. Try again later.", "App updates",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private void OfferManagerUpdate()
+    {
+        if (MessageBox.Show(this, "Version " + availableUpdate + " is available. Open the release page to download Setup?",
+            "App updates", MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
+            return;
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(ManagerReleasePage + availableUpdateTag) { UseShellExecute = true });
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            MessageBox.Show(this, "Could not open your web browser. The release is at " +
+                ManagerReleasePage + availableUpdateTag, "App updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+
     private static WebClient GitHubClient()
     {
         var client = new WebClient();
@@ -463,42 +778,68 @@ internal sealed class Manager : Form
 
     private static Asset Package(Addon addon)
     {
-        if (addon.Latest == null || addon.Latest.assets == null)
+        if (addon.Latest == null || String.IsNullOrWhiteSpace(addon.Latest.tag_name) || addon.Latest.assets == null)
             return null;
-        return addon.Latest.assets.FirstOrDefault(asset =>
+        if (addon.IsQuestieBundle || addon.IsQuestieDatabase)
+        {
+            string[] versions = addon.ReleaseVersions(addon.Latest.tag_name);
+            if (versions == null)
+                return null;
+            string expected = addon.IsQuestieBundle ?
+                "Questie-v" + versions[0] + "+v" + versions[1] + ".zip" :
+                "QuestieDB-" + versions[0].TrimStart('v', 'V') + "-Forever.zip";
+            return addon.Latest.assets.FirstOrDefault(asset => asset != null &&
+                String.Equals(asset.name, expected, StringComparison.OrdinalIgnoreCase));
+        }
+
+        Asset exact = addon.Latest.assets.FirstOrDefault(asset => asset != null &&
             String.Equals(asset.name, addon.Folder + ".zip", StringComparison.OrdinalIgnoreCase));
+        if (exact != null || !addon.Custom)
+            return exact;
+
+        Asset[] zipAssets = addon.Latest.assets.Where(asset => asset != null && asset.name != null &&
+            asset.name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
+        return zipAssets.Length == 1 ? zipAssets[0] : null;
     }
 
     private void ShowInstalled(Addon addon)
     {
-        string version = null;
+        string[] folders = addon.Folders;
+        var installed = new string[folders.Length];
+        bool anyInstalled = false;
         if (addonDirectory.Length > 0)
         {
-            try { version = AddonFiles.VersionAt(Path.Combine(addonDirectory, addon.Folder), addon.Folder); }
-            catch (IOException) { version = "Unreadable"; }
-            catch (UnauthorizedAccessException) { version = "Unreadable"; }
+            for (int index = 0; index < folders.Length; index++)
+            {
+                string folder = folders[index];
+                string path = Path.Combine(addonDirectory, folder);
+                anyInstalled |= Directory.Exists(path);
+                try { installed[index] = AddonFiles.VersionAt(path, addon.Manifest(folder)); }
+                catch (IOException) { installed[index] = "Unreadable"; }
+                catch (UnauthorizedAccessException) { installed[index] = "Unreadable"; }
+            }
         }
-        addon.Tile.Installed = version ?? (addonDirectory.Length == 0 ? "Select folder" : "Unknown");
+        addon.Tile.Installed = addonDirectory.Length == 0 ? "Select folder" :
+            !anyInstalled && Package(addon) != null ? "Not installed" :
+            String.Join(" + ", installed.Select(version => version ?? "Unknown"));
         if (Package(addon) != null)
         {
+            string[] latest = addon.ReleaseVersions(addon.Latest.tag_name);
             addon.Tile.State = addonDirectory.Length == 0 ? "" :
-                AddonFiles.SameVersion(version, addon.Latest.tag_name) ? "Current" :
-                Directory.Exists(Path.Combine(addonDirectory, addon.Folder)) ? "Version differs" :
-                "Ready to install";
-            if (addonDirectory.Length > 0 && !Directory.Exists(Path.Combine(addonDirectory, addon.Folder)))
-                addon.Tile.Installed = "Not installed";
+                installed.Zip(latest, AddonFiles.SameVersion).All(matches => matches) ? "Current" :
+                anyInstalled ? "Version differs" : "Ready to install";
         }
         ShowDetails(addon);
     }
 
-    private async Task RefreshReleases()
+    private async Task RefreshReleases(Addon only = null)
     {
         busy = true;
         UpdateButtons();
         status.Text = "Checking GitHub for releases...";
         try
         {
-            foreach (Addon addon in addons)
+            foreach (Addon addon in only == null ? (IEnumerable<Addon>)addons : new[] { only })
             {
                 addon.Latest = null;
                 addon.Tile.Release = "";
@@ -519,7 +860,7 @@ internal sealed class Manager : Form
                         string json = await client.DownloadStringTaskAsync(new Uri(endpoint));
                         addon.Latest = new JavaScriptSerializer().Deserialize<Release>(json);
                     }
-                    addon.Tile.Release = addon.Latest.tag_name;
+                    addon.Tile.Release = addon.Latest == null ? "" : addon.Latest.tag_name;
                     if (Package(addon) == null)
                         addon.Tile.State = "ZIP missing";
                 }
@@ -553,7 +894,7 @@ internal sealed class Manager : Form
 
         string directory = addonDirectory;
         int unavailable = addons.Count(addon => addon.Tile.Selected) - batch.Length;
-        string[] replacements = batch.Where(addon => Directory.Exists(Path.Combine(directory, addon.Folder)))
+        string[] replacements = batch.Where(addon => addon.Folders.Any(folder => Directory.Exists(Path.Combine(directory, folder))))
             .Select(addon => addon.Name + " (" + addon.Latest.tag_name + ")").ToArray();
         if (replacements.Length > 0 &&
             MessageBox.Show(this, "Replace the installed files for these add-ons?\n\n" +
@@ -651,9 +992,9 @@ internal sealed class Manager : Form
             var catalog = new JavaScriptSerializer().Deserialize<Addon[]>(json);
             if (catalog == null || catalog.Length == 0 || catalog.Any(addon => addon == null ||
                 String.IsNullOrWhiteSpace(addon.Name) ||
-                !Regex.IsMatch(addon.Folder ?? "", @"\A[A-Za-z0-9_][A-Za-z0-9_-]*\z") ||
+                !ValidFolder(addon.Folder) ||
                 (!String.IsNullOrEmpty(addon.Repository) &&
-                    !Regex.IsMatch(addon.Repository, @"\A[A-Za-z0-9-]+/[A-Za-z0-9_.-]+\z"))) ||
+                    !ValidRepository(addon.Repository))) ||
                 catalog.Select(addon => addon.Folder).Distinct(StringComparer.OrdinalIgnoreCase).Count() != catalog.Length)
                 throw new InvalidDataException("The addon catalog has an invalid or duplicate entry.");
             Application.Run(new Manager(catalog));
