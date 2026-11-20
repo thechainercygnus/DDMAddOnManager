@@ -58,7 +58,7 @@ Use PowerShell 7 on 64-bit Windows.
 
 ## Add-on catalog and release packages
 
-The catalog in [addons.json](addons.json) lists Character Planner Export, DDM Action Bar Manager, and Forever API Explorer. Each entry specifies the add-on folder, display name, and GitHub repository.
+The catalog in [addons.json](addons.json) lists Character Planner Export, DDM Action Bar Manager, Forever API Explorer, and Vendor Deals. Each entry specifies the add-on folder, display name, and GitHub repository.
 
 For each add-on release, set the TOC's `## Version:` to the release version and publish a stable GitHub release with a matching tag, such as `v0.2.0` for TOC version `0.2.0`. Attach a ZIP named `<AddonFolder>.zip` containing `<AddonFolder>/<AddonFolder>.toc`. The manager checks the latest public stable release and downloads that exact asset.
 

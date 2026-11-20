@@ -13,5 +13,10 @@
     "Folder": "ForeverAPIExplorer",
     "Name": "Forever API Explorer",
     "Repository": "thechainercygnus/ForeverAPIExplorer"
+  },
+  {
+    "Folder": "VendorDeals",
+    "Name": "Vendor Deals",
+    "Repository": "thechainercygnus/VendorDeals"
   }
 ]
